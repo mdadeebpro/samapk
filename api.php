@@ -4,8 +4,13 @@ include 'include/db.php';
 $action = $_POST['action'] ?? '';
 
 if ($action == 'add_to_cart') {
-    $pid = $_POST['product_id'] ?? 0;
-    $selectedSize = $_POST['size'] ?? null; // <--- المقاس المختار
+    $pid = filter_input(INPUT_POST, 'product_id', FILTER_VALIDATE_INT);
+    $selectedSize = isset($_POST['size']) ? htmlspecialchars(trim($_POST['size'])) : null;
+
+    if ($pid === false || $pid <= 0) {
+        echo json_encode(['status'=>'error', 'message'=>'معرف منتج غير صالح']);
+        exit;
+    }
 
     // التحقق من المنتج
     $stmt = $pdo->prepare("SELECT id, quantity, sizes FROM products WHERE id = ?");
@@ -69,17 +74,28 @@ if ($action == 'get_cart') {
 
 // --- حذف من السلة ---
 if ($action == 'remove_from_cart') {
-    $cart_id = $_POST['cart_id'];
+    $cart_id = filter_input(INPUT_POST, 'cart_id', FILTER_VALIDATE_INT);
+
+    if ($cart_id === false || $cart_id <= 0) {
+        echo json_encode(['status'=>'error', 'message'=>'معرف سلة غير صالح']);
+        exit;
+    }
+
     $pdo->prepare("DELETE FROM cart WHERE id = ? AND session_id = ?")->execute([$cart_id, $user_session]);
     echo json_encode(['status' => 'success', 'count' => getCartCount($pdo, $user_session)]);
 }
 
 // --- إتمام الشراء (Checkout) ---
 if ($action == 'checkout') {
-    $name = $_POST['name'];
-    $phone = $_POST['phone'];
-    $address = $_POST['address'];
-    $notes = $_POST['notes'];
+    $name = htmlspecialchars(trim($_POST['name']));
+    $phone = htmlspecialchars(trim($_POST['phone']));
+    $address = htmlspecialchars(trim($_POST['address']));
+    $notes = htmlspecialchars(trim($_POST['notes']));
+
+    if (empty($name) || empty($phone) || empty($address)) {
+        echo json_encode(['status'=>'error', 'message'=>'يرجى ملء جميع الحقول المطلوبة.']);
+        exit;
+    }
     
     $lowStockAlerts = []; // مصفوفة التنبيهات
 
@@ -195,8 +211,18 @@ if ($action == 'checkout') {
 
 // --- تعديل: تحديث الكمية (زيادة / نقصان) مع التحقق من المخزون ---
 if ($action == 'update_cart_qty') {
-    $cart_id = $_POST['cart_id'];
+    $cart_id = filter_input(INPUT_POST, 'cart_id', FILTER_VALIDATE_INT);
     $op = $_POST['operation']; // 'increase' or 'decrease'
+
+    if ($cart_id === false || $cart_id <= 0) {
+        echo json_encode(['status'=>'error', 'message'=>'معرف سلة غير صالح']);
+        exit;
+    }
+
+    if (!in_array($op, ['increase', 'decrease'])) {
+        echo json_encode(['status'=>'error', 'message'=>'عملية غير صالحة']);
+        exit;
+    }
 
     // 1. جلب معلومات المنتج والكمية الحالية في السلة ومعلومات المخزون
     // نستخدم JOIN لنجلب كمية المنتج الأصلية + كمية السلة الحالية
@@ -276,7 +302,12 @@ if ($action == 'save_invoice_image') {
 }
 // --- 7. إدارة المفضلة (إضافة / حذف) ---
 if ($action == 'toggle_favorite') {
-    $pid = $_POST['product_id'];
+    $pid = filter_input(INPUT_POST, 'product_id', FILTER_VALIDATE_INT);
+
+    if ($pid === false || $pid <= 0) {
+        echo json_encode(['status'=>'error', 'message'=>'معرف منتج غير صالح']);
+        exit;
+    }
     
     // فحص هل المنتج موجود في مفضلة هذا المستخدم؟
     $stmt = $pdo->prepare("SELECT id FROM favorites WHERE session_id = ? AND product_id = ?");
@@ -297,9 +328,14 @@ if ($action == 'toggle_favorite') {
 
 // --- حفظ اشتراك الإشعارات ---
 if ($action == 'save_subscription') {
-    $endpoint = $_POST['endpoint'];
-    $p256dh = $_POST['p256dh'];
-    $auth = $_POST['auth'];
+    $endpoint = filter_input(INPUT_POST, 'endpoint', FILTER_SANITIZE_URL);
+    $p256dh = $_POST['p256dh'] ?? null;
+    $auth = $_POST['auth'] ?? null;
+
+    if (empty($endpoint) || empty($p256dh) || empty($auth)) {
+        // Not a valid subscription
+        exit;
+    }
 
     // نتأكد أنه غير موجود سابقاً
     $check = $pdo->prepare("SELECT id FROM push_subscriptions WHERE endpoint = ?");

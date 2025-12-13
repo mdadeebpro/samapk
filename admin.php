@@ -124,16 +124,29 @@ if (isset($_POST['add_product'])) {
     $cat=$_POST['category']; $note=$_POST['note']; $sizes=!empty($_POST['sizes'])?$_POST['sizes']:null;
     if ($disc!==null && $disc>=$price) { echo "<script>alert('خطأ: سعر الخصم أكبر من الرسمي');window.history.back();</script>"; exit; }
 
-    // --- Image Optimization Integration ---
-    $imgName = time() . '_' . basename($_FILES['image']['name']);
-    $targetPath = 'uploads/' . $imgName;
-    if (!optimizeImage($_FILES['image']['tmp_name'], $targetPath)) {
-        echo "<script>alert('خطأ في رفع الصورة');window.history.back();</script>";
+    // --- Enhanced Image Upload Security ---
+    if (!empty($_FILES['image']['name'])) {
+        $validationResult = validateImageUpload($_FILES['image']);
+        if ($validationResult !== true) {
+            echo "<script>alert('$validationResult');window.history.back();</script>";
+            exit;
+        }
+
+        // Process and optimize the image
+        $originalImgName = time() . '_' . basename($_FILES['image']['name']);
+        $newImgName = optimizeImage($_FILES['image']['tmp_name'], $originalImgName);
+        if ($newImgName === false) {
+            echo "<script>alert('خطأ في معالجة الصورة، قد يكون نوع الملف غير مدعوم.');window.history.back();</script>";
+            exit;
+        }
+
+        $pdo->prepare("INSERT INTO products (name,description,supplier,sizes,category_id,price,discount_price,quantity,image,admin_note) VALUES (?,?,?,?,?,?,?,?,?,?)")->execute([$name,$desc,$supplier,$sizes,$cat,$price,$disc,$qty,$newImgName,$note]);
+
+    } else {
+        echo "<script>alert('خطأ: يجب اختيار صورة للمنتج.');window.history.back();</script>";
         exit;
     }
     // ------------------------------------
-
-    $pdo->prepare("INSERT INTO products (name,description,supplier,sizes,category_id,price,discount_price,quantity,image,admin_note) VALUES (?,?,?,?,?,?,?,?,?,?)")->execute([$name,$desc,$supplier,$sizes,$cat,$price,$disc,$qty,$imgName,$note]);
     // =========================================
     if (class_exists('Minishlink\WebPush\WebPush')) {
         
@@ -185,15 +198,22 @@ if (isset($_POST['update_product'])) {
     $cat=$_POST['category']; $note=$_POST['note']; $sizes=!empty($_POST['sizes'])?$_POST['sizes']:null;
     if ($disc!==null && $disc>=$price) { echo "<script>alert('خطأ: سعر الخصم أكبر من الرسمي');window.history.back();</script>"; exit; }
     if (!empty($_FILES['image']['name'])) {
-        // --- Image Optimization Integration ---
-        $imgName = time() . '_' . basename($_FILES['image']['name']);
-        $targetPath = 'uploads/' . $imgName;
-        if (!optimizeImage($_FILES['image']['tmp_name'], $targetPath)) {
-            echo "<script>alert('خطأ في رفع الصورة');window.history.back();</script>";
+        $validationResult = validateImageUpload($_FILES['image']);
+        if ($validationResult !== true) {
+            echo "<script>alert('$validationResult');window.history.back();</script>";
             exit;
         }
-        // ------------------------------------
-        $pdo->prepare("UPDATE products SET name=?,description=?,supplier=?,sizes=?,category_id=?,price=?,discount_price=?,quantity=?,admin_note=?,image=? WHERE id=?")->execute([$name,$desc,$supplier,$sizes,$cat,$price,$disc,$qty,$note,$imgName,$id]);
+
+        // Process and optimize the image
+        $originalImgName = time() . '_' . basename($_FILES['image']['name']);
+        $newImgName = optimizeImage($_FILES['image']['tmp_name'], $originalImgName);
+        if ($newImgName === false) {
+            echo "<script>alert('خطأ في معالجة الصورة، قد يكون نوع الملف غير مدعوم.');window.history.back();</script>";
+            exit;
+        }
+
+        $pdo->prepare("UPDATE products SET name=?,description=?,supplier=?,sizes=?,category_id=?,price=?,discount_price=?,quantity=?,admin_note=?,image=? WHERE id=?")->execute([$name,$desc,$supplier,$sizes,$cat,$price,$disc,$qty,$note,$newImgName,$id]);
+
     } else {
         $pdo->prepare("UPDATE products SET name=?,description=?,supplier=?,sizes=?,category_id=?,price=?,discount_price=?,quantity=?,admin_note=? WHERE id=?")->execute([$name,$desc,$supplier,$sizes,$cat,$price,$disc,$qty,$note,$id]);
     }
@@ -227,8 +247,21 @@ if ($searchQuery) {
     $oS = $pdo->prepare("SELECT o.*, GROUP_CONCAT(CONCAT(oi.product_name, IF(oi.size IS NOT NULL AND oi.size != '', CONCAT(' <span style=\'color:#d00000; font-weight:bold;\'>[', oi.size, ']</span>'), ''), ' <span style=\'color:#666; font-size:0.85em;\'>(x', oi.qty, ')</span>') SEPARATOR '<br>') as items_summary FROM orders o LEFT JOIN order_items oi ON o.id = oi.order_id WHERE o.customer_name LIKE ? OR o.invoice_code LIKE ? GROUP BY o.id ORDER BY o.created_at DESC");
     $oS->execute([$term, $term]); $searchOrds = $oS->fetchAll(PDO::FETCH_ASSOC);
 } else {
-    $products = $pdo->query("SELECT p.*, c.name as cat_name, (SELECT COALESCE(SUM(qty), 0) FROM cart WHERE product_id = p.id) as total_reserved FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.created_at DESC")->fetchAll(PDO::FETCH_ASSOC);
-    $ordQ = "SELECT o.*, GROUP_CONCAT(CONCAT(oi.product_name, IF(oi.size IS NOT NULL AND oi.size != '', CONCAT(' <span style=\'color:#d00000; font-weight:bold;\'>[', oi.size, ']</span>'), ''), ' <span style=\'color:#666; font-size:0.85em;\'>(x', oi.qty, ')</span>') SEPARATOR '<br>') as items_summary FROM orders o LEFT JOIN order_items oi ON o.id = oi.order_id GROUP BY o.id ORDER BY o.created_at DESC LIMIT 50";
+    // --- Products Pagination ---
+    $prodPage = isset($_GET['prod_page']) ? (int)$_GET['prod_page'] : 1;
+    $prodsPerPage = 10;
+    $prodOffset = ($prodPage - 1) * $prodsPerPage;
+    $totalProds = $pdo->query("SELECT COUNT(*) FROM products")->fetchColumn();
+    $totalProdPages = ceil($totalProds / $prodsPerPage);
+    $products = $pdo->query("SELECT p.*, c.name as cat_name, (SELECT COALESCE(SUM(qty), 0) FROM cart WHERE product_id = p.id) as total_reserved FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.created_at DESC LIMIT $prodsPerPage OFFSET $prodOffset")->fetchAll(PDO::FETCH_ASSOC);
+
+    // --- Orders Pagination ---
+    $ordPage = isset($_GET['ord_page']) ? (int)$_GET['ord_page'] : 1;
+    $ordsPerPage = 10;
+    $ordOffset = ($ordPage - 1) * $ordsPerPage;
+    $totalOrds = $pdo->query("SELECT COUNT(*) FROM orders")->fetchColumn();
+    $totalOrdPages = ceil($totalOrds / $ordsPerPage);
+    $ordQ = "SELECT o.*, GROUP_CONCAT(CONCAT(oi.product_name, IF(oi.size IS NOT NULL AND oi.size != '', CONCAT(' <span style=\'color:#d00000; font-weight:bold;\'>[', oi.size, ']</span>'), ''), ' <span style=\'color:#666; font-size:0.85em;\'>(x', oi.qty, ')</span>') SEPARATOR '<br>') as items_summary FROM orders o LEFT JOIN order_items oi ON o.id = oi.order_id GROUP BY o.id ORDER BY o.created_at DESC LIMIT $ordsPerPage OFFSET $ordOffset";
     $orders = $pdo->query($ordQ)->fetchAll(PDO::FETCH_ASSOC);
 }
 ?>
@@ -284,38 +317,73 @@ if ($searchQuery) {
         <div id="tab-orders" class="tab-content active">
             <div class="panel">
                 <div class="panel-header"><h3 class="admin-h3">سجل الطلبات</h3><form method="POST" onsubmit="return confirm('تفريغ؟');"><button name="delete_all_orders" class="btn btn-red">🗑️ تفريغ</button></form></div>
-                <table class="admin-table">
-                    <thead>
-                        <tr>
-                            <th>رقم</th>
-                            <th>العميل</th>
-                            <th>المنتجات</th>
-                            <th>الإجمالي</th>
-                            <th>الحالة</th>
-                            <th>التاريخ</th>
-                            <th>تحكم</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php $stArr=['new'=>['جديد','#333'],'processing'=>['تجهيز','#e67e22'],'shipping'=>['توصيل','#3498db'],'delivered'=>['تم','#27ae60'],'canceled'=>['ملغي','#c0392b']]; foreach($orders as $ord): $k=$ord['status']?:'new'; ?>
-                        <tr>
-                            <td data-label="رقم">#<?= htmlspecialchars($ord['id']) ?><br><small><?= htmlspecialchars($ord['invoice_code']) ?></small></td>
-                            <td data-label="العميل"><b><?= htmlspecialchars($ord['customer_name']) ?></b><br><small><?= htmlspecialchars($ord['customer_phone']) ?></small><br><small><?= htmlspecialchars($ord['address']) ?></small><?php if($ord['notes']) echo "<br><small style='color:red'>📝" . htmlspecialchars($ord['notes']) . "</small>"; ?></td>
-                            <td data-label="المنتجات"><?= $ord['items_summary'] ?></td>
-                            <td data-label="الإجمالي" style="color:green;font-weight:bold;"><?= htmlspecialchars($ord['total_amount']) ?></td>
-                            <td data-label="الحالة"><form method="POST"><input type="hidden" name="order_id" value="<?= $ord['id'] ?>"><select name="status" onchange="this.form.submit()" class="admin-select" style="background:<?= $stArr[$k][1] ?>;color:#fff;border:none;font-weight:bold;padding:5px;"><?php foreach($stArr as $x=>$y): ?><option value="<?= $x ?>" <?= $k==$x?'selected':'' ?> style="background:#fff;color:#000;"><?= $y[0] ?></option><?php endforeach; ?></select><input type="hidden" name="update_order_status" value="1"></form></td>
-                            <td data-label="التاريخ"><?= date('Y-m-d', strtotime($ord['created_at'])) ?></td>
-                            <td data-label="تحكم">
-                            <a href="admin.php?tab=orders&manage_order=<?= $ord['id'] ?>" class="btn btn-dark">🔍 تفاصيل/إرجاع</a></td>
-                        </tr><?php endforeach; ?>
-                        
-                    </tbody>
-                </table>
+                <?php if (count($orders) > 0): ?>
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>رقم</th>
+                                <th>العميل</th>
+                                <th>المنتجات</th>
+                                <th>الإجمالي</th>
+                                <th>الحالة</th>
+                                <th>التاريخ</th>
+                                <th>تحكم</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php $stArr=['new'=>['جديد','#333'],'processing'=>['تجهيز','#e67e22'],'shipping'=>['توصيل','#3498db'],'delivered'=>['تم','#27ae60'],'canceled'=>['ملغي','#c0392b']]; foreach($orders as $ord): $k=$ord['status']?:'new'; ?>
+                            <tr>
+                                <td data-label="رقم">#<?= htmlspecialchars($ord['id']) ?><br><small><?= htmlspecialchars($ord['invoice_code']) ?></small></td>
+                                <td data-label="العميل"><b><?= htmlspecialchars($ord['customer_name']) ?></b><br><small><?= htmlspecialchars($ord['customer_phone']) ?></small><br><small><?= htmlspecialchars($ord['address']) ?></small><?php if($ord['notes']) echo "<br><small style='color:red'>📝" . htmlspecialchars($ord['notes']) . "</small>"; ?></td>
+                                <td data-label="المنتجات"><?= $ord['items_summary'] ?></td>
+                                <td data-label="الإجمالي" style="color:green;font-weight:bold;"><?= htmlspecialchars($ord['total_amount']) ?></td>
+                                <td data-label="الحالة"><form method="POST"><input type="hidden" name="order_id" value="<?= $ord['id'] ?>"><select name="status" onchange="this.form.submit()" class="admin-select" style="background:<?= $stArr[$k][1] ?>;color:#fff;border:none;font-weight:bold;padding:5px;"><?php foreach($stArr as $x=>$y): ?><option value="<?= $x ?>" <?= $k==$x?'selected':'' ?> style="background:#fff;color:#000;"><?= $y[0] ?></option><?php endforeach; ?></select><input type="hidden" name="update_order_status" value="1"></form></td>
+                                <td data-label="التاريخ"><?= date('Y-m-d', strtotime($ord['created_at'])) ?></td>
+                                <td data-label="تحكم">
+                                <a href="admin.php?tab=orders&manage_order=<?= $ord['id'] ?>" class="btn btn-dark">🔍 تفاصيل/إرجاع</a></td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                    <div class="pagination">
+                        <?php for ($i = 1; $i <= $totalOrdPages; $i++): ?>
+                            <a href="?tab=tab-orders&ord_page=<?= $i ?>" class="<?= ($ordPage == $i) ? 'active' : '' ?>"><?= $i ?></a>
+                        <?php endfor; ?>
+                    </div>
+                <?php else: ?>
+                    <p style="text-align:center; padding: 20px;">لا توجد أي طلبات حالياً.</p>
+                <?php endif; ?>
             </div>
         </div>
 
         <div id="tab-products" class="tab-content">
-            <div class="panel"><div class="panel-header"><h3 class="admin-h3">المنتجات</h3><button class="btn btn-green" onclick="openModal('addProdModal')">+ منتج</button></div><table class="admin-table"><thead><tr><th>صورة</th><th>المنتج</th><th>السعر</th><th>المخزون</th><th>القسم</th><th>تحكم</th></tr></thead><tbody><?php foreach($products as $prod): $sTxt="∞"; $bg=""; if($prod['quantity']!==null){ $n=$prod['quantity']-$prod['total_reserved']; if($n<=0){$sTxt="🚫 نفذت";$bg="background:#fff0f0";} elseif($n<5){$sTxt="⚠️ $n";$bg="background:#fffbe6";} else{$sTxt="✅ $n";} } ?><tr style="<?= $bg ?>"><td data-label="صورة"><img src="uploads/<?= htmlspecialchars($prod['image']) ?>" class="thumb"></td><td data-label="المنتج"><b><?= htmlspecialchars($prod['name']) ?></b><?php if($prod['admin_note']) echo "<br><small style='color:red'>📝" . htmlspecialchars($prod['admin_note']) . "</small>"; ?></td><td data-label="السعر"><?php if($prod['discount_price']): ?><s><?= htmlspecialchars($prod['price']) ?></s> <b style="color:#d00000"><?= htmlspecialchars($prod['discount_price']) ?></b><?php else: echo htmlspecialchars($prod['price']); endif; ?></td><td data-label="المخزون"><?= $sTxt ?></td><td data-label="القسم"><?= htmlspecialchars($prod['cat_name']) ?></td><td data-label="تحكم"><button class="btn btn-orange" onclick='openEditProd(<?= json_encode($prod) ?>)'>تعديل</button><form method="POST" class="admin-form-inline" onsubmit="return confirm('حذف؟');"><input type="hidden" name="prod_id" value="<?= $prod['id'] ?>"><button name="delete_product" class="btn btn-red">حذف</button></form></td></tr><?php endforeach; ?></tbody></table></div>
+            <div class="panel">
+                <div class="panel-header"><h3 class="admin-h3">المنتجات</h3><button class="btn btn-green" onclick="openModal('addProdModal')">+ منتج</button></div>
+                <?php if (count($products) > 0): ?>
+                    <table class="admin-table">
+                        <thead><tr><th>صورة</th><th>المنتج</th><th>السعر</th><th>المخزون</th><th>القسم</th><th>تحكم</th></tr></thead>
+                        <tbody>
+                            <?php foreach($products as $prod): $sTxt="∞"; $bg=""; if($prod['quantity']!==null){ $n=$prod['quantity']-$prod['total_reserved']; if($n<=0){$sTxt="🚫 نفذت";$bg="background:#fff0f0";} elseif($n<5){$sTxt="⚠️ $n";$bg="background:#fffbe6";} else{$sTxt="✅ $n";} } ?>
+                            <tr style="<?= $bg ?>">
+                                <td data-label="صورة"><img src="uploads/<?= htmlspecialchars($prod['image']) ?>" class="thumb"></td>
+                                <td data-label="المنتج"><b><?= htmlspecialchars($prod['name']) ?></b><?php if($prod['admin_note']) echo "<br><small style='color:red'>📝" . htmlspecialchars($prod['admin_note']) . "</small>"; ?></td>
+                                <td data-label="السعر"><?php if($prod['discount_price']): ?><s><?= htmlspecialchars($prod['price']) ?></s> <b style="color:#d00000"><?= htmlspecialchars($prod['discount_price']) ?></b><?php else: echo htmlspecialchars($prod['price']); endif; ?></td>
+                                <td data-label="المخزون"><?= $sTxt ?></td>
+                                <td data-label="القسم"><?= htmlspecialchars($prod['cat_name']) ?></td>
+                                <td data-label="تحكم"><button class="btn btn-orange" onclick='openEditProd(<?= json_encode($prod) ?>)'>تعديل</button><form method="POST" class="admin-form-inline" onsubmit="return confirm('حذف؟');"><input type="hidden" name="prod_id" value="<?= $prod['id'] ?>"><button name="delete_product" class="btn btn-red">حذف</button></form></td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                    <div class="pagination">
+                        <?php for ($i = 1; $i <= $totalProdPages; $i++): ?>
+                            <a href="?tab=tab-products&prod_page=<?= $i ?>" class="<?= ($prodPage == $i) ? 'active' : '' ?>"><?= $i ?></a>
+                        <?php endfor; ?>
+                    </div>
+                <?php else: ?>
+                    <p style="text-align:center; padding: 20px;">لم يتم إضافة أي منتجات بعد.</p>
+                <?php endif; ?>
+            </div>
         </div>
 
         <div id="tab-cats" class="tab-content">
